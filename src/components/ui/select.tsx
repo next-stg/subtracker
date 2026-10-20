@@ -10,7 +10,7 @@ function Select({
   ...props
 }: React.ComponentProps<"select"> & { showIcon?: boolean }) {
   return (
-    <div className="relative">
+    <div className={cn("relative w-full", className)}>
       <select
         data-slot="select"
         className={cn(

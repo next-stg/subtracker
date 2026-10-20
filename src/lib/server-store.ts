@@ -1,9 +1,10 @@
 import "server-only";
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { Pool, type PoolClient } from "pg";
 
 export type StoredUser = {
   id: number;
@@ -104,10 +105,10 @@ const schema = `
     password_hash TEXT NOT NULL,
     currency TEXT NOT NULL,
     language TEXT NOT NULL,
-    notification_enabled INTEGER NOT NULL,
+    notification_enabled BOOLEAN NOT NULL,
     created_at TEXT NOT NULL,
     display_currency TEXT NOT NULL,
-    email_notifications INTEGER NOT NULL,
+    email_notifications BOOLEAN NOT NULL,
     renewal_reminder_days INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS categories (
@@ -212,152 +213,12 @@ function loadLegacyStore(): Store {
   };
 }
 
-function replaceStore(database: DatabaseSync, store: Store) {
-  database.exec(`
-    DELETE FROM refresh_tokens;
-    DELETE FROM password_reset_tokens;
-    DELETE FROM password_entries;
-    DELETE FROM notifications;
-    DELETE FROM subscriptions;
-    DELETE FROM categories;
-    DELETE FROM users;
-    DELETE FROM next_ids;
-  `);
-
-  const insertUser = database.prepare(`
-    INSERT INTO users (
-      id, email, username, password_hash, currency, language,
-      notification_enabled, created_at, display_currency,
-      email_notifications, renewal_reminder_days
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  for (const user of store.users) {
-    insertUser.run(
-      user.id, user.email, user.username, user.password_hash, user.currency,
-      user.language, Number(user.notification_enabled), user.created_at,
-      user.display_currency, Number(user.email_notifications),
-      user.renewal_reminder_days
-    );
-  }
-
-  const insertCategory = database.prepare(
-    "INSERT INTO categories (id, user_id, name, color) VALUES (?, ?, ?, ?)"
-  );
-  for (const category of store.categories) {
-    insertCategory.run(category.id, category.user_id, category.name, category.color);
-  }
-
-  const insertSubscription = database.prepare(`
-    INSERT INTO subscriptions (
-      id, user_id, name, description, amount, currency, frequency,
-      start_date, billing_date, status, category, website, notes,
-      created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  for (const subscription of store.subscriptions) {
-    insertSubscription.run(
-      subscription.id, subscription.user_id, subscription.name,
-      subscription.description, subscription.amount, subscription.currency,
-      subscription.frequency, subscription.start_date, subscription.billing_date,
-      subscription.status, subscription.category, subscription.website,
-      subscription.notes, subscription.created_at, subscription.updated_at
-    );
-  }
-
-  const insertNotification = database.prepare(`
-    INSERT INTO notifications (
-      id, user_id, subscription_id, subscription_name, billing_date,
-      created_at, read_at, dismissed_at, email_sent_at, email_sending_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  for (const notification of store.notifications) {
-    insertNotification.run(
-      notification.id, notification.user_id, notification.subscription_id,
-      notification.subscription_name, notification.billing_date,
-      notification.created_at, notification.read_at, notification.dismissed_at,
-      notification.email_sent_at ?? null, notification.email_sending_at ?? null
-    );
-  }
-
-  const insertPasswordEntry = database.prepare(`
-    INSERT INTO password_entries (id, user_id, encrypted_data, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  for (const entry of store.password_entries) {
-    insertPasswordEntry.run(
-      entry.id, entry.user_id, entry.encrypted_data, entry.created_at, entry.updated_at
-    );
-  }
-
-  const insertRefreshToken = database.prepare(
-    "INSERT INTO refresh_tokens (token, user_id) VALUES (?, ?)"
-  );
-  for (const token of store.refresh_tokens) {
-    insertRefreshToken.run(token.token, token.user_id);
-  }
-
-  const insertPasswordResetToken = database.prepare(`
-    INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, created_at)
-    VALUES (?, ?, ?, ?)
-  `);
-  for (const token of store.password_reset_tokens) {
-    insertPasswordResetToken.run(token.token_hash, token.user_id, token.expires_at, token.created_at);
-  }
-
-  const insertNextId = database.prepare(
-    "INSERT INTO next_ids (name, value) VALUES (?, ?)"
-  );
-  for (const [name, value] of Object.entries(store.next_ids)) {
-    insertNextId.run(name, value);
-  }
-}
-
-const globalStore = globalThis as typeof globalThis & {
-  subtrackerDatabase?: DatabaseSync;
-};
-
-function getDatabase(): DatabaseSync {
-  if (globalStore.subtrackerDatabase) return globalStore.subtrackerDatabase;
-
-  mkdirSync(dataDirectory, { recursive: true });
-  const connection = new DatabaseSync(databasePath);
+function loadLegacySqliteStore(): Store {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    connection.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    connection.exec(schema);
-
-    const migration = connection.prepare(
-      "SELECT name FROM migrations WHERE name = ?"
-    ).get("import-json-store-v1");
-    if (!migration) {
-      connection.exec("BEGIN IMMEDIATE");
-      try {
-        if (existsSync(legacyStorePath)) {
-          replaceStore(connection, loadLegacyStore());
-        }
-        connection.prepare("INSERT INTO migrations (name) VALUES (?)")
-          .run("import-json-store-v1");
-        connection.exec("COMMIT");
-      } catch (error) {
-        connection.exec("ROLLBACK");
-        throw error;
-      }
-    }
-
-    globalStore.subtrackerDatabase = connection;
-    return connection;
-  } catch (error) {
-    connection.close();
-    throw error;
-  }
-}
-
-function readRows(database: DatabaseSync, query: string): Record<string, unknown>[] {
-  return database.prepare(query).all();
-}
-
-function readStoreFromDatabase(database: DatabaseSync): Store {
-  const users = readRows(database, "SELECT * FROM users")
-    .map((row): StoredUser => ({
+    const readRows = (query: string) =>
+      database.prepare(query).all() as Record<string, unknown>[];
+    const users = readRows("SELECT * FROM users").map((row): StoredUser => ({
       id: Number(row.id),
       email: String(row.email),
       username: String(row.username),
@@ -370,14 +231,286 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
       email_notifications: Number(row.email_notifications) !== 0,
       renewal_reminder_days: Number(row.renewal_reminder_days),
     }));
-  const categories = readRows(database, "SELECT * FROM categories")
+    const categories = readRows("SELECT * FROM categories").map((row): StoredCategory => ({
+      id: Number(row.id),
+      user_id: Number(row.user_id),
+      name: String(row.name),
+      color: String(row.color),
+    }));
+    const subscriptions = readRows("SELECT * FROM subscriptions").map((row): StoredSubscription => ({
+      id: Number(row.id),
+      user_id: Number(row.user_id),
+      name: String(row.name),
+      description: row.description === null ? null : String(row.description),
+      amount: String(row.amount),
+      currency: String(row.currency),
+      frequency: String(row.frequency) as StoredSubscription["frequency"],
+      start_date: String(row.start_date),
+      billing_date: String(row.billing_date),
+      status: String(row.status) as StoredSubscription["status"],
+      category: row.category === null ? null : Number(row.category),
+      website: row.website === null ? null : String(row.website),
+      notes: row.notes === null ? null : String(row.notes),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+    }));
+    const notifications = readRows("SELECT * FROM notifications").map((row): StoredNotification => ({
+      id: String(row.id),
+      user_id: Number(row.user_id),
+      subscription_id: Number(row.subscription_id),
+      subscription_name: String(row.subscription_name),
+      billing_date: String(row.billing_date),
+      created_at: String(row.created_at),
+      read_at: row.read_at === null ? null : String(row.read_at),
+      dismissed_at: row.dismissed_at === null ? null : String(row.dismissed_at),
+      email_sent_at: row.email_sent_at === null ? null : String(row.email_sent_at),
+      email_sending_at: row.email_sending_at === null ? null : String(row.email_sending_at),
+    }));
+    const passwordEntries = readRows("SELECT * FROM password_entries").map((row): StoredPasswordEntry => ({
+      id: String(row.id),
+      user_id: Number(row.user_id),
+      encrypted_data: String(row.encrypted_data),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+    }));
+    const refreshTokens = readRows("SELECT token, user_id FROM refresh_tokens")
+      .map((row) => ({ token: String(row.token), user_id: Number(row.user_id) }));
+    const passwordResetTokens = readRows(
+      "SELECT token_hash, user_id, expires_at, created_at FROM password_reset_tokens"
+    ).map((row) => ({
+      token_hash: String(row.token_hash),
+      user_id: Number(row.user_id),
+      expires_at: String(row.expires_at),
+      created_at: String(row.created_at),
+    }));
+    const nextIds = { ...emptyStore.next_ids };
+    for (const row of readRows("SELECT name, value FROM next_ids")) {
+      if (row.name === "users") nextIds.users = Number(row.value);
+      if (row.name === "categories") nextIds.categories = Number(row.value);
+      if (row.name === "subscriptions") nextIds.subscriptions = Number(row.value);
+    }
+
+    return {
+      users,
+      categories,
+      subscriptions,
+      notifications,
+      password_entries: passwordEntries,
+      refresh_tokens: refreshTokens,
+      password_reset_tokens: passwordResetTokens,
+      next_ids: nextIds,
+    };
+  } finally {
+    database.close();
+  }
+}
+
+async function replaceStore(database: PoolClient, store: Store) {
+  await database.query(`
+    DELETE FROM refresh_tokens;
+    DELETE FROM password_reset_tokens;
+    DELETE FROM password_entries;
+    DELETE FROM notifications;
+    DELETE FROM subscriptions;
+    DELETE FROM categories;
+    DELETE FROM users;
+    DELETE FROM next_ids;
+  `);
+
+  for (const user of store.users) {
+    await database.query(`
+    INSERT INTO users (
+      id, email, username, password_hash, currency, language,
+      notification_enabled, created_at, display_currency,
+      email_notifications, renewal_reminder_days
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  `, [
+      user.id, user.email, user.username, user.password_hash, user.currency,
+      user.language, user.notification_enabled, user.created_at,
+      user.display_currency, user.email_notifications,
+      user.renewal_reminder_days
+    ]);
+  }
+
+  for (const category of store.categories) {
+    await database.query(
+      "INSERT INTO categories (id, user_id, name, color) VALUES ($1, $2, $3, $4)",
+      [category.id, category.user_id, category.name, category.color]
+    );
+  }
+
+  for (const subscription of store.subscriptions) {
+    await database.query(`
+    INSERT INTO subscriptions (
+      id, user_id, name, description, amount, currency, frequency,
+      start_date, billing_date, status, category, website, notes,
+      created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+  `, [
+      subscription.id, subscription.user_id, subscription.name,
+      subscription.description, subscription.amount, subscription.currency,
+      subscription.frequency, subscription.start_date, subscription.billing_date,
+      subscription.status, subscription.category, subscription.website,
+      subscription.notes, subscription.created_at, subscription.updated_at
+    ]);
+  }
+
+  for (const notification of store.notifications) {
+    await database.query(`
+    INSERT INTO notifications (
+      id, user_id, subscription_id, subscription_name, billing_date,
+      created_at, read_at, dismissed_at, email_sent_at, email_sending_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  `, [
+      notification.id, notification.user_id, notification.subscription_id,
+      notification.subscription_name, notification.billing_date,
+      notification.created_at, notification.read_at, notification.dismissed_at,
+      notification.email_sent_at ?? null, notification.email_sending_at ?? null
+    ]);
+  }
+
+  for (const entry of store.password_entries) {
+    await database.query(`
+    INSERT INTO password_entries (id, user_id, encrypted_data, created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5)
+  `, [
+      entry.id, entry.user_id, entry.encrypted_data, entry.created_at, entry.updated_at
+    ]);
+  }
+
+  for (const token of store.refresh_tokens) {
+    await database.query(
+      "INSERT INTO refresh_tokens (token, user_id) VALUES ($1, $2)",
+      [token.token, token.user_id]
+    );
+  }
+
+  for (const token of store.password_reset_tokens) {
+    await database.query(`
+    INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, created_at)
+    VALUES ($1, $2, $3, $4)
+  `, [token.token_hash, token.user_id, token.expires_at, token.created_at]);
+  }
+
+  for (const [name, value] of Object.entries(store.next_ids)) {
+    await database.query(
+      "INSERT INTO next_ids (name, value) VALUES ($1, $2)",
+      [name, value]
+    );
+  }
+}
+
+const globalStore = globalThis as typeof globalThis & {
+  subtrackerPool?: Pool;
+  subtrackerInitialization?: Promise<void>;
+};
+
+function getPool(): Pool {
+  if (globalStore.subtrackerPool) return globalStore.subtrackerPool;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL must be configured to connect to PostgreSQL.");
+  }
+  const pool = new Pool({ connectionString, max: 10, connectionTimeoutMillis: 10_000 });
+  pool.on("error", (error) => {
+    console.error("Unexpected error from the PostgreSQL connection pool.", error);
+  });
+  globalStore.subtrackerPool = pool;
+  return pool;
+}
+
+async function initializeDatabase(pool: Pool): Promise<void> {
+  const connection = await pool.connect();
+  try {
+    await connection.query(schema);
+    await connection.query("BEGIN");
+    try {
+      await connection.query("SELECT pg_advisory_xact_lock($1)", [731054091]);
+      const migration = await connection.query(
+        "SELECT name FROM migrations WHERE name = $1",
+        ["import-json-store-v1"]
+      );
+      if (migration.rowCount === 0) {
+        if (existsSync(databasePath)) {
+          await replaceStore(connection, loadLegacySqliteStore());
+        } else if (existsSync(legacyStorePath)) {
+          await replaceStore(connection, loadLegacyStore());
+        }
+        await connection.query("INSERT INTO migrations (name) VALUES ($1)", ["import-json-store-v1"]);
+      }
+      await connection.query("COMMIT");
+    } catch (error) {
+      try {
+        await connection.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Failed to roll back PostgreSQL initialization.", rollbackError);
+      }
+      throw error;
+    }
+  } finally {
+    connection.release();
+  }
+}
+
+async function getDatabase(): Promise<Pool> {
+  const pool = getPool();
+  if (!globalStore.subtrackerInitialization) {
+    globalStore.subtrackerInitialization = initializeDatabase(pool).catch((error: unknown) => {
+      globalStore.subtrackerInitialization = undefined;
+      throw error;
+    });
+  }
+  await globalStore.subtrackerInitialization;
+  return pool;
+}
+
+async function readRows(database: PoolClient, query: string): Promise<Record<string, unknown>[]> {
+  const result = await database.query<Record<string, unknown>>(query);
+  return result.rows;
+}
+
+async function readStoreFromDatabase(database: PoolClient): Promise<Store> {
+  const [
+    userRows,
+    categoryRows,
+    subscriptionRows,
+    notificationRows,
+    passwordEntryRows,
+    refreshTokenRows,
+    passwordResetTokenRows,
+    nextIdRows,
+  ] = await Promise.all([
+    readRows(database, "SELECT * FROM users"),
+    readRows(database, "SELECT * FROM categories"),
+    readRows(database, "SELECT * FROM subscriptions"),
+    readRows(database, "SELECT * FROM notifications"),
+    readRows(database, "SELECT * FROM password_entries"),
+    readRows(database, "SELECT token, user_id FROM refresh_tokens"),
+    readRows(database, "SELECT token_hash, user_id, expires_at, created_at FROM password_reset_tokens"),
+    readRows(database, "SELECT name, value FROM next_ids"),
+  ]);
+  const users = userRows
+    .map((row): StoredUser => ({
+      id: Number(row.id),
+      email: String(row.email),
+      username: String(row.username),
+      password_hash: String(row.password_hash),
+      currency: String(row.currency),
+      language: String(row.language),
+      notification_enabled: Boolean(row.notification_enabled),
+      created_at: String(row.created_at),
+      display_currency: String(row.display_currency),
+      email_notifications: Boolean(row.email_notifications),
+      renewal_reminder_days: Number(row.renewal_reminder_days),
+    }));
+  const categories = categoryRows
     .map((row): StoredCategory => ({
       id: Number(row.id),
       user_id: Number(row.user_id),
       name: String(row.name),
       color: String(row.color),
     }));
-  const subscriptions = readRows(database, "SELECT * FROM subscriptions")
+  const subscriptions = subscriptionRows
     .map((row): StoredSubscription => ({
       id: Number(row.id),
       user_id: Number(row.user_id),
@@ -395,7 +528,7 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
     }));
-  const notifications = readRows(database, "SELECT * FROM notifications")
+  const notifications = notificationRows
     .map((row): StoredNotification => ({
       id: String(row.id),
       user_id: Number(row.user_id),
@@ -408,7 +541,7 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
       email_sent_at: row.email_sent_at === null ? null : String(row.email_sent_at),
       email_sending_at: row.email_sending_at === null ? null : String(row.email_sending_at),
     }));
-  const passwordEntries = readRows(database, "SELECT * FROM password_entries")
+  const passwordEntries = passwordEntryRows
     .map((row): StoredPasswordEntry => ({
       id: String(row.id),
       user_id: Number(row.user_id),
@@ -416,9 +549,9 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
     }));
-  const refreshTokens = readRows(database, "SELECT token, user_id FROM refresh_tokens")
+  const refreshTokens = refreshTokenRows
     .map((row) => ({ token: String(row.token), user_id: Number(row.user_id) }));
-  const passwordResetTokens = readRows(database, "SELECT token_hash, user_id, expires_at, created_at FROM password_reset_tokens")
+  const passwordResetTokens = passwordResetTokenRows
     .map((row) => ({
       token_hash: String(row.token_hash),
       user_id: Number(row.user_id),
@@ -426,7 +559,7 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
       created_at: String(row.created_at),
     }));
   const nextIds = { ...emptyStore.next_ids };
-  for (const row of readRows(database, "SELECT name, value FROM next_ids")) {
+  for (const row of nextIdRows) {
     if (row.name === "users") nextIds.users = Number(row.value);
     if (row.name === "categories") nextIds.categories = Number(row.value);
     if (row.name === "subscriptions") nextIds.subscriptions = Number(row.value);
@@ -445,21 +578,45 @@ function readStoreFromDatabase(database: DatabaseSync): Store {
 }
 
 async function readStore(): Promise<Store> {
-  return readStoreFromDatabase(getDatabase());
+  const pool = await getDatabase();
+  const connection = await pool.connect();
+  try {
+    await connection.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const store = await readStoreFromDatabase(connection);
+    await connection.query("COMMIT");
+    return store;
+  } catch (error) {
+    try {
+      await connection.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Failed to roll back PostgreSQL read transaction.", rollbackError);
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 export async function updateStore<T>(mutate: (store: Store) => T): Promise<T> {
-  const connection = getDatabase();
-  connection.exec("BEGIN IMMEDIATE");
+  const pool = await getDatabase();
+  const connection = await pool.connect();
   try {
-    const store = readStoreFromDatabase(connection);
+    await connection.query("BEGIN");
+    await connection.query("SELECT pg_advisory_xact_lock($1)", [731054091]);
+    const store = await readStoreFromDatabase(connection);
     const result = mutate(store);
-    replaceStore(connection, store);
-    connection.exec("COMMIT");
+    await replaceStore(connection, store);
+    await connection.query("COMMIT");
     return result;
   } catch (error) {
-    connection.exec("ROLLBACK");
+    try {
+      await connection.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Failed to roll back PostgreSQL write transaction.", rollbackError);
+    }
     throw error;
+  } finally {
+    connection.release();
   }
 }
 

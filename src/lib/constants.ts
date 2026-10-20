@@ -63,9 +63,9 @@ export function formatMoney(amount: number | string, currency: string) {
   const value = typeof amount === "string" ? Number(amount) : amount;
   if (!Number.isFinite(value)) return "—";
   if (currency === "XOF") {
-    return `${new Intl.NumberFormat("de-DE", {
+    return `${new Intl.NumberFormat("fr-FR", {
       maximumFractionDigits: 0,
-    }).format(value)} F`;
+    }).format(value)} fcfa`;
   }
   try {
     return new Intl.NumberFormat("fr-FR", {

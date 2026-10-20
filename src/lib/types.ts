@@ -84,28 +84,6 @@ export interface SiteNotification {
   days_until: number;
 }
 
-export interface PasswordEntrySummary {
-  id: string;
-  title: string;
-  username: string;
-  website: string;
-  notes: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PasswordEntry extends PasswordEntrySummary {
-  password: string;
-}
-
-export interface PasswordEntryPayload {
-  title: string;
-  username: string;
-  password: string;
-  website?: string;
-  notes?: string;
-}
-
 export interface AuthResponse {
   user: User;
   refresh: string;

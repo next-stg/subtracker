@@ -105,7 +105,6 @@ export default function SettingsPage() {
                     <Select
                       id="currency"
                       className="max-w-xs"
-                      showIcon={false}
                       value={prefs.display_currency}
                       onChange={(e) =>
                         setPrefs({ ...prefs, display_currency: e.target.value })
@@ -147,7 +146,6 @@ export default function SettingsPage() {
                       <Select
                         id="reminder"
                         className="max-w-xs"
-                        showIcon={false}
                         value={prefs.renewal_reminder_days}
                         onChange={(e) =>
                           setPrefs({

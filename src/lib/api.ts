@@ -1,9 +1,6 @@
 import { ApiError, type ApiErrorBody, type AuthResponse, type SiteNotification, type User } from "@/lib/types";
 import type {
   Category,
-  PasswordEntry,
-  PasswordEntryPayload,
-  PasswordEntrySummary,
   Subscription,
   SubscriptionPayload,
   SubscriptionStats,
@@ -176,34 +173,6 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ action }) },
       { auth: true }
     );
-  },
-
-  getPasswordEntries() {
-    return request<PasswordEntrySummary[]>("/api/passwords/", { method: "GET" }, { auth: true });
-  },
-
-  getPasswordEntry(id: string) {
-    return request<PasswordEntry>(`/api/passwords/${encodeURIComponent(id)}/`, { method: "GET" }, { auth: true });
-  },
-
-  createPasswordEntry(payload: PasswordEntryPayload) {
-    return request<PasswordEntry>("/api/passwords/", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }, { auth: true });
-  },
-
-  updatePasswordEntry(id: string, payload: PasswordEntryPayload) {
-    return request<PasswordEntry>(`/api/passwords/${encodeURIComponent(id)}/`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    }, { auth: true });
-  },
-
-  deletePasswordEntry(id: string) {
-    return request<void>(`/api/passwords/${encodeURIComponent(id)}/`, {
-      method: "DELETE",
-    }, { auth: true });
   },
 
   updatePreferences(payload: Partial<UserPreferences>) {

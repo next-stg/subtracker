@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -8,19 +8,11 @@ import {
   readStore,
   type StoredCategory,
   type StoredNotification,
-  type StoredPasswordEntry,
   type StoredSubscription,
   type StoredUser,
   updateStore,
   verifyPassword,
 } from "@/lib/server-store";
-import {
-  assertPasswordVaultConfigured,
-  decryptPasswordEntry,
-  encryptPasswordEntry,
-  PasswordVaultConfigurationError,
-  type PasswordEntryData,
-} from "@/lib/password-vault";
 import { createSmtpTransporter, sendPasswordResetEmail, sendRenewalEmail } from "@/lib/email";
 
 const secret = process.env.AUTH_SECRET || "subtracker-development-secret";
@@ -88,53 +80,6 @@ function validSubscription(body: Record<string, unknown>) {
   if (!allowedStatuses.includes(body.status as typeof allowedStatuses[number])) return "Le statut est invalide.";
   if (typeof body.start_date !== "string" || typeof body.billing_date !== "string") return "Les dates sont obligatoires.";
   return null;
-}
-
-function validPasswordEntry(body: Record<string, unknown>) {
-  if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100) return "Le nom du service est obligatoire (100 caractères maximum).";
-  if (typeof body.password !== "string" || !body.password || body.password.length > 4096) return "Le mot de passe est obligatoire (4 096 caractères maximum).";
-  if (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 254)) return "L’identifiant est invalide.";
-  if (body.website !== undefined && (typeof body.website !== "string" || body.website.length > 2048)) return "L’adresse du site est invalide.";
-  if (typeof body.website === "string" && body.website) {
-    try {
-      const website = new URL(body.website);
-      if (website.protocol !== "https:" && website.protocol !== "http:") return "L’adresse doit utiliser HTTP ou HTTPS.";
-    } catch {
-      return "L’adresse du site est invalide.";
-    }
-  }
-  if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 5000)) return "Les notes sont trop longues.";
-  return null;
-}
-
-function passwordEntryResponse(entry: StoredPasswordEntry, data: PasswordEntryData) {
-  return {
-    id: entry.id,
-    title: data.title,
-    username: data.username,
-    password: data.password,
-    website: data.website,
-    notes: data.notes,
-    created_at: entry.created_at,
-    updated_at: entry.updated_at,
-  };
-}
-
-function passwordEntrySummary(entry: StoredPasswordEntry, data: PasswordEntryData) {
-  return {
-    id: entry.id,
-    title: data.title,
-    username: data.username,
-    website: data.website,
-    notes: data.notes,
-    created_at: entry.created_at,
-    updated_at: entry.updated_at,
-  };
-}
-
-function passwordVaultError(caught: unknown) {
-  if (caught instanceof PasswordVaultConfigurationError) return error(caught.message, 503);
-  return error("Impossible de déchiffrer les données du coffre-fort.", 500);
 }
 
 function isAuthorizedCronRequest(request: NextRequest, cronSecret: string) {
@@ -330,28 +275,6 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
   }
   const store = await readStore();
 
-  if (route === "passwords") {
-    try {
-      assertPasswordVaultConfigured();
-      const entries = store.password_entries
-        .filter((entry) => entry.user_id === user.id)
-        .map((entry) => passwordEntrySummary(entry, decryptPasswordEntry(entry.encrypted_data)));
-      return json(entries);
-    } catch (caught) {
-      return passwordVaultError(caught);
-    }
-  }
-  const passwordMatch = route.match(/^passwords\/([a-f\d-]{36})$/i);
-  if (passwordMatch) {
-    const entry = store.password_entries.find((item) => item.id === passwordMatch[1] && item.user_id === user.id);
-    if (!entry) return error("Identifiant introuvable.", 404);
-    try {
-      return json(passwordEntryResponse(entry, decryptPasswordEntry(entry.encrypted_data)));
-    } catch (caught) {
-      return passwordVaultError(caught);
-    }
-  }
-
   if (route === "auth/profile") return json(publicUser(user));
   if (route === "auth/preferences") return json({ display_currency: user.display_currency || user.currency, email_notifications: user.email_notifications, renewal_reminder_days: user.renewal_reminder_days, language: user.language });
   if (route === "categories") return json(store.categories.filter((category) => category.user_id === user.id).map((category) => categoryResponse(category, store.subscriptions)));
@@ -526,33 +449,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
 
   const user = await authenticatedUser(request);
   if (!user) return error("Authentification requise.", 401);
-  if (route === "passwords") {
-    const validationError = validPasswordEntry(body);
-    if (validationError) return error(validationError);
-    const now = new Date().toISOString();
-    const data: PasswordEntryData = {
-      title: (body.title as string).trim(),
-      username: typeof body.username === "string" ? body.username : "",
-      password: body.password as string,
-      website: typeof body.website === "string" ? body.website : "",
-      notes: typeof body.notes === "string" ? body.notes : "",
-    };
-    try {
-      const entry: StoredPasswordEntry = {
-        id: randomUUID(),
-        user_id: user.id,
-        encrypted_data: encryptPasswordEntry(data),
-        created_at: now,
-        updated_at: now,
-      };
-      return updateStore((store) => {
-        store.password_entries.push(entry);
-        return json(passwordEntrySummary(entry, data), 201);
-      });
-    } catch (caught) {
-      return passwordVaultError(caught);
-    }
-  }
   if (route === "auth/logout") {
     const refresh = typeof body.refresh_token === "string" ? body.refresh_token : "";
     await updateStore((store) => { store.refresh_tokens = store.refresh_tokens.filter((item) => item.token !== refresh); });
@@ -573,33 +469,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
 export async function PUT(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   const route = path.join("/");
-  const passwordMatch = route.match(/^passwords\/([a-f\d-]{36})$/i);
   const user = await authenticatedUser(request);
   if (!user) return error("Authentification requise.", 401);
   const body = await request.json().catch(() => ({})) as Record<string, unknown>;
-  if (passwordMatch) {
-    const validationError = validPasswordEntry(body);
-    if (validationError) return error(validationError);
-    const data: PasswordEntryData = {
-      title: (body.title as string).trim(),
-      username: typeof body.username === "string" ? body.username : "",
-      password: body.password as string,
-      website: typeof body.website === "string" ? body.website : "",
-      notes: typeof body.notes === "string" ? body.notes : "",
-    };
-    try {
-      const encryptedData = encryptPasswordEntry(data);
-      return updateStore((store) => {
-        const entry = store.password_entries.find((item) => item.id === passwordMatch[1] && item.user_id === user.id);
-        if (!entry) return error("Identifiant introuvable.", 404);
-        entry.encrypted_data = encryptedData;
-        entry.updated_at = new Date().toISOString();
-        return json(passwordEntrySummary(entry, data));
-      });
-    } catch (caught) {
-      return passwordVaultError(caught);
-    }
-  }
   if (route !== "auth/preferences") return error("Ressource introuvable.", 404);
   if (typeof body.display_currency === "string" && !allowedCurrencies.includes(body.display_currency as typeof allowedCurrencies[number])) {
     return error("La devise sélectionnée n'est pas prise en charge.", 400, "display_currency");
@@ -643,17 +515,6 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ p
 export async function DELETE(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   const route = path.join("/");
-  const passwordMatch = route.match(/^passwords\/([a-f\d-]{36})$/i);
-  if (passwordMatch) {
-    const user = await authenticatedUser(request);
-    if (!user) return error("Authentification requise.", 401);
-    return updateStore((store) => {
-      const index = store.password_entries.findIndex((item) => item.id === passwordMatch[1] && item.user_id === user.id);
-      if (index < 0) return error("Identifiant introuvable.", 404);
-      store.password_entries.splice(index, 1);
-      return new NextResponse(null, { status: 204 });
-    });
-  }
   const match = route.match(/^subscriptions\/(\d+)$/);
   if (!match) return error("Ressource introuvable.", 404);
   const user = await authenticatedUser(request);
