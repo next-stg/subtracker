@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-subtracker}"
+      POSTGRES_USER: "${POSTGRES_USER:-subtracker}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-subtracker}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-subtracker}"
+      AUTH_SECRET: "${AUTH_SECRET:?Set AUTH_SECRET in .env}"
+      CRON_SECRET: "${CRON_SECRET:?Set CRON_SECRET in .env}"
+      SMTP_HOST: "${SMTP_HOST:-smtp.gmail.com}"
+      SMTP_PORT: "${SMTP_PORT:-465}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASS: "${SMTP_PASS:-}"
+      EMAIL_FROM: "${EMAIL_FROM:-}"
+      APP_URL: "${APP_URL:-http://localhost:3000}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./.data:/app/.data:ro
+
+volumes:
+  postgres_data:
