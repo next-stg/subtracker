@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-subtracker}"
@@ -53,5 +53,5 @@ networks:
   subtracker_tracked-net:
     internal: true
   proxy-net:
-    name: "${TRAEFIK_NETWORK:-traefik}"
+    name: "${TRAEFIK_NETWORK:-proxy-net}"
     external: true
