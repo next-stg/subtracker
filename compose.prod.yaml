@@ -1,13 +1,15 @@
 services:
   db:
-    image: postgres:18-alpine
+    image: postgres:18.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-subtracker}"
       POSTGRES_USER: "${POSTGRES_USER:-subtracker}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    security_opt:
+      - no-new-privileges:true
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -15,8 +17,14 @@ services:
       retries: 10
       start_period: 10s
     networks:
-      - subtracker_tracked-net
-
+      - tracked-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 256M
   app:
     build:
       context: .
@@ -37,7 +45,7 @@ services:
       SMTP_FROM_NAME: "${SMTP_FROM_NAME:-Subtracker}"
       APP_URL: "${APP_URL:?Set APP_URL in .env}"
     networks:
-      - subtracker_tracked-net
+      - tracked-net
       - proxy-net
     labels:
       traefik.enable: "true"
@@ -45,12 +53,28 @@ services:
       traefik.http.routers.subtracker.rule: "Host(`${APP_DOMAIN:?Set APP_DOMAIN in .env}`)"
       traefik.http.routers.subtracker.entrypoints: "${TRAEFIK_ENTRYPOINT:-web}"
       traefik.http.services.subtracker.loadbalancer.server.port: "3000"
+    # Durcissement du conteneur applicatif
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+      - /app/.next/cache:mode=1777,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 256M
 
 volumes:
   postgres_data:
 
 networks:
-  subtracker_tracked-net:
+  tracked-net:
     internal: true
   proxy-net:
     name: "${TRAEFIK_NETWORK:-proxy-net}"
