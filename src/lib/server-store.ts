@@ -41,6 +41,7 @@ export type StoredSubscription = {
   category: number | null;
   website: string | null;
   notes: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -132,8 +133,10 @@ const schema = `
     website TEXT,
     notes TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
   );
+  ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS deleted_at TEXT;
   CREATE TABLE IF NOT EXISTS notifications (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -200,7 +203,10 @@ function loadLegacyStore(): Store {
   return {
     users: collection<StoredUser>("users"),
     categories: collection<StoredCategory>("categories"),
-    subscriptions: collection<StoredSubscription>("subscriptions"),
+    subscriptions: collection<StoredSubscription>("subscriptions").map((subscription) => ({
+      ...subscription,
+      deleted_at: subscription.deleted_at ?? null,
+    })),
     notifications: collection<StoredNotification>("notifications"),
     password_entries: collection<StoredPasswordEntry>("password_entries"),
     refresh_tokens: collection<Store["refresh_tokens"][number]>("refresh_tokens"),
@@ -251,6 +257,7 @@ function loadLegacySqliteStore(): Store {
       category: row.category === null ? null : Number(row.category),
       website: row.website === null ? null : String(row.website),
       notes: row.notes === null ? null : String(row.notes),
+      deleted_at: row.deleted_at == null ? null : String(row.deleted_at),
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
     }));
@@ -344,14 +351,15 @@ async function replaceStore(database: PoolClient, store: Store) {
     INSERT INTO subscriptions (
       id, user_id, name, description, amount, currency, frequency,
       start_date, billing_date, status, category, website, notes,
-      created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      created_at, updated_at, deleted_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
   `, [
       subscription.id, subscription.user_id, subscription.name,
       subscription.description, subscription.amount, subscription.currency,
       subscription.frequency, subscription.start_date, subscription.billing_date,
       subscription.status, subscription.category, subscription.website,
-      subscription.notes, subscription.created_at, subscription.updated_at
+      subscription.notes, subscription.created_at, subscription.updated_at,
+      subscription.deleted_at ?? null
     ]);
   }
 
@@ -525,6 +533,7 @@ async function readStoreFromDatabase(database: PoolClient): Promise<Store> {
       category: row.category === null ? null : Number(row.category),
       website: row.website === null ? null : String(row.website),
       notes: row.notes === null ? null : String(row.notes),
+      deleted_at: row.deleted_at == null ? null : String(row.deleted_at),
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
     }));

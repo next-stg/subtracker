@@ -140,6 +140,24 @@ export const api = {
     });
   },
 
+  updateEmail(payload: { email: string; current_password: string }) {
+    return request<User>("/api/auth/account/email/", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }, { auth: true });
+  },
+
+  changePassword(payload: {
+    current_password: string;
+    password: string;
+    password_confirm: string;
+  }) {
+    return request<AuthResponse>("/api/auth/account/password/", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }, { auth: true });
+  },
+
   logout(refresh: string) {
     return request<void>(
       "/api/auth/logout/",
@@ -210,6 +228,30 @@ export const api = {
       { method: "GET" },
       { auth: true }
     ).then(unwrapList<Subscription>);
+  },
+
+  getDeletedSubscriptions() {
+    return request<Subscription[] | { results: Subscription[] }>(
+      "/api/subscriptions/deleted/",
+      { method: "GET" },
+      { auth: true }
+    ).then(unwrapList<Subscription>);
+  },
+
+  restoreSubscription(id: number) {
+    return request<Subscription>(
+      `/api/subscriptions/${id}/restore/`,
+      { method: "POST" },
+      { auth: true }
+    );
+  },
+
+  permanentlyDeleteSubscription(id: number) {
+    return request<void>(
+      `/api/subscriptions/${id}/permanent/`,
+      { method: "DELETE" },
+      { auth: true }
+    );
   },
 
   createSubscription(payload: SubscriptionPayload) {

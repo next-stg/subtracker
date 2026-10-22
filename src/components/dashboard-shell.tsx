@@ -11,6 +11,7 @@ import {
   LogOut,
   Settings,
   HelpCircle,
+  Trash2,
 } from "lucide-react";
 
 import { NotificationBell } from "@/components/notification-bell";
@@ -21,6 +22,7 @@ import { cn } from "@/lib/utils";
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/subscriptions", label: "Abonnements", icon: CreditCard },
+  { href: "/subscriptions/history", label: "Historique", icon: Trash2 },
   { href: "/analytics", label: "Analyses", icon: LineChart },
   { href: "/settings", label: "Paramètres", icon: Settings },
 ];
@@ -28,6 +30,7 @@ const NAV_ITEMS = [
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "Vue d'ensemble",
   "/subscriptions": "Abonnements",
+  "/subscriptions/history": "Historique",
   "/analytics": "Analyses",
   "/settings": "Paramètres",
 };

@@ -69,6 +69,35 @@ services:
           memory: 512M
         reservations:
           memory: 256M
+  subscription-cleanup:
+    image: curlimages/curl:8.12.1
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      while true; do
+        curl --fail --show-error --silent --retry 5 --retry-delay 5 --retry-connrefused \
+          --header "Authorization: Bearer $${CRON_SECRET}" \
+          http://app:3000/api/cron/subscription-cleanup
+        sleep 86400
+      done
+    environment:
+      CRON_SECRET: "${CRON_SECRET:?Set CRON_SECRET in .env}"
+    networks:
+      - tracked-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 64M
+        reservations:
+          memory: 16M
 
 volumes:
   postgres_data:

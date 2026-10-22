@@ -10,6 +10,8 @@ export const CURRENCIES = [
   { value: "GBP", label: "Livre sterling (£)" },
 ];
 
+export const DELETED_SUBSCRIPTION_RETENTION_DAYS = 30;
+
 export const FREQUENCY_LABELS: Record<SubscriptionFrequency, string> = {
   monthly: "Mensuel",
   yearly: "Annuel",

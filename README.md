@@ -49,6 +49,12 @@ Sur le serveur :
 
 Les données PostgreSQL persistent dans le volume `postgres_data`. `docker compose --env-file .env.production -f compose.prod.yaml down` arrête les services sans supprimer les données ; ne rajoutez pas `-v` sauf si vous souhaitez supprimer la base.
 
+Les abonnements supprimés restent restaurables pendant 30 jours avant leur suppression définitive. Dans ce déploiement, le service `subscription-cleanup` lance automatiquement le nettoyage chaque jour.
+
+## Historique des abonnements supprimés
+
+Les abonnements supprimés restent restaurables pendant 30 jours avant leur suppression définitive. Le nettoyage est planifié quotidiennement à 07:15 UTC sur Vercel et exécuté par le service `subscription-cleanup` en production Compose. Sur un autre hébergement, configurez un cron quotidien pour appeler `/api/cron/subscription-cleanup` avec l'en-tête d'autorisation `CRON_SECRET`.
+
 ## Rappels par e-mail
 
 Les rappels de renouvellement et la réinitialisation de mot de passe utilisent Gmail SMTP. Activez la validation en deux étapes sur le compte Google, puis créez un mot de passe d'application dans les paramètres de sécurité Google. Utilisez ce mot de passe d'application, jamais le mot de passe habituel du compte. Certains comptes administrés par une organisation peuvent interdire les mots de passe d'application.

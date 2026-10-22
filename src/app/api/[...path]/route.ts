@@ -2,7 +2,10 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { annualEquivalent } from "@/lib/constants";
+import {
+  annualEquivalent,
+  DELETED_SUBSCRIPTION_RETENTION_DAYS,
+} from "@/lib/constants";
 import {
   hashPassword,
   readStore,
@@ -63,7 +66,7 @@ function authResponse(user: StoredUser, refresh: string) {
 }
 
 function categoryResponse(category: StoredCategory, subscriptions: StoredSubscription[]) {
-  return { id: category.id, name: category.name, color: category.color, subscription_count: subscriptions.filter((subscription) => subscription.category === category.id).length };
+  return { id: category.id, name: category.name, color: category.color, subscription_count: subscriptions.filter((subscription) => subscription.deleted_at == null && subscription.category === category.id).length };
 }
 
 function subscriptionResponse(subscription: StoredSubscription, categories: StoredCategory[]) {
@@ -89,10 +92,43 @@ function isAuthorizedCronRequest(request: NextRequest, cronSecret: string) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
+function purgeExpiredSubscriptions(store: {
+  subscriptions: StoredSubscription[];
+  notifications: StoredNotification[];
+}) {
+  const expiration = Date.now() - DELETED_SUBSCRIPTION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const expiredIds = new Set(
+    store.subscriptions
+      .filter((subscription) =>
+        subscription.deleted_at && Date.parse(subscription.deleted_at) <= expiration
+      )
+      .map((subscription) => subscription.id)
+  );
+  if (expiredIds.size === 0) return 0;
+
+  store.subscriptions = store.subscriptions.filter(
+    (subscription) => !expiredIds.has(subscription.id)
+  );
+  store.notifications = store.notifications.filter(
+    (notification) => !expiredIds.has(notification.subscription_id)
+  );
+  return expiredIds.size;
+}
+
+async function cleanExpiredSubscriptions(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return error("CRON_SECRET n'est pas configuré.", 503);
+  if (!isAuthorizedCronRequest(request, cronSecret)) return error("Authentification requise.", 401);
+
+  const deleted = await updateStore((store) => purgeExpiredSubscriptions(store));
+  return json({ deleted });
+}
+
 async function sendDueRenewalEmails(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) return error("CRON_SECRET n'est pas configuré.", 503);
   if (!isAuthorizedCronRequest(request, cronSecret)) return error("Authentification requise.", 401);
+  await updateStore((store) => purgeExpiredSubscriptions(store));
 
   const smtpHost = process.env.SMTP_HOST;
   const smtpPort = Number(process.env.SMTP_PORT || "465");
@@ -130,7 +166,7 @@ async function sendDueRenewalEmails(request: NextRequest) {
   const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const initialStore = await readStore();
   const candidates = initialStore.subscriptions.filter((subscription) => {
-    if (subscription.status !== "active") return false;
+    if (subscription.deleted_at || subscription.status !== "active") return false;
     const user = initialStore.users.find((item) => item.id === subscription.user_id);
     if (!user?.email_notifications || !user.email) return false;
     const dueTime = Date.parse(`${subscription.billing_date.slice(0, 10)}T00:00:00Z`);
@@ -149,6 +185,7 @@ async function sendDueRenewalEmails(request: NextRequest) {
       const currentSubscription = store.subscriptions.find((item) =>
         item.id === subscription.id &&
         item.user_id === subscription.user_id &&
+        !item.deleted_at &&
         item.status === "active" &&
         item.billing_date.slice(0, 10) === billingDate
       );
@@ -224,6 +261,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
   const { path } = await context.params;
   const route = path.join("/");
   if (route === "cron/reminders") return sendDueRenewalEmails(request);
+  if (route === "cron/subscription-cleanup") return cleanExpiredSubscriptions(request);
   const user = await authenticatedUser(request);
   if (!user) return error("Authentification requise.", 401);
   if (route === "notifications") {
@@ -235,7 +273,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
       const reminderDays = Math.max(0, currentUser.renewal_reminder_days ?? 3);
 
       for (const subscription of currentStore.subscriptions) {
-        if (subscription.user_id !== user.id || subscription.status !== "active") continue;
+        if (subscription.user_id !== user.id || subscription.deleted_at || subscription.status !== "active") continue;
         const billingDate = subscription.billing_date.slice(0, 10);
         const dueTime = Date.parse(`${billingDate}T00:00:00Z`);
         if (!Number.isFinite(dueTime)) continue;
@@ -278,13 +316,22 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
   if (route === "auth/profile") return json(publicUser(user));
   if (route === "auth/preferences") return json({ display_currency: user.display_currency || user.currency, email_notifications: user.email_notifications, renewal_reminder_days: user.renewal_reminder_days, language: user.language });
   if (route === "categories") return json(store.categories.filter((category) => category.user_id === user.id).map((category) => categoryResponse(category, store.subscriptions)));
+  if (route === "subscriptions/deleted") {
+    return updateStore((currentStore) => {
+      purgeExpiredSubscriptions(currentStore);
+      return json(currentStore.subscriptions
+        .filter((subscription) => subscription.user_id === user.id && subscription.deleted_at)
+        .sort((a, b) => (b.deleted_at ?? "").localeCompare(a.deleted_at ?? ""))
+        .map((subscription) => subscriptionResponse(subscription, currentStore.categories)));
+    });
+  }
   if (route === "subscriptions") {
     const status = request.nextUrl.searchParams.get("status");
     const category = request.nextUrl.searchParams.get("category");
-    return json(store.subscriptions.filter((subscription) => subscription.user_id === user.id && (!status || subscription.status === status) && (!category || subscription.category === Number(category))).map((subscription) => subscriptionResponse(subscription, store.categories)));
+    return json(store.subscriptions.filter((subscription) => subscription.user_id === user.id && !subscription.deleted_at && (!status || subscription.status === status) && (!category || subscription.category === Number(category))).map((subscription) => subscriptionResponse(subscription, store.categories)));
   }
   if (route === "subscriptions/stats") {
-    const active = store.subscriptions.filter((subscription) => subscription.user_id === user.id && subscription.status === "active");
+    const active = store.subscriptions.filter((subscription) => subscription.user_id === user.id && !subscription.deleted_at && subscription.status === "active");
     const yearly = active.reduce((sum, subscription) => sum + annualEquivalent(subscription.amount, subscription.frequency), 0);
     const monthly = yearly / 12;
     const now = Date.now();
@@ -449,10 +496,65 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
 
   const user = await authenticatedUser(request);
   if (!user) return error("Authentification requise.", 401);
+  const restoreMatch = route.match(/^subscriptions\/(\d+)\/restore$/);
+  if (restoreMatch) {
+    return updateStore((store) => {
+      purgeExpiredSubscriptions(store);
+      const subscription = store.subscriptions.find(
+        (item) => item.id === Number(restoreMatch[1]) && item.user_id === user.id
+      );
+      if (!subscription?.deleted_at) return error("Abonnement supprimé introuvable.", 404);
+      subscription.deleted_at = null;
+      subscription.updated_at = new Date().toISOString();
+      return json(subscriptionResponse(subscription, store.categories));
+    });
+  }
   if (route === "auth/logout") {
     const refresh = typeof body.refresh_token === "string" ? body.refresh_token : "";
     await updateStore((store) => { store.refresh_tokens = store.refresh_tokens.filter((item) => item.token !== refresh); });
     return new NextResponse(null, { status: 204 });
+  }
+  if (route === "auth/account/email") {
+    if (typeof body.email !== "string" || !body.email.trim().includes("@")) {
+      return error("L'adresse e-mail est invalide.", 400, "email");
+    }
+    if (typeof body.current_password !== "string" || !body.current_password) {
+      return error("Saisissez votre mot de passe actuel.", 400, "current_password");
+    }
+    const email = body.email.trim().toLowerCase();
+    return updateStore((store) => {
+      const current = store.users.find((item) => item.id === user.id);
+      if (!current || !verifyPassword(body.current_password as string, current.password_hash)) {
+        return error("Le mot de passe actuel est incorrect.", 400, "current_password");
+      }
+      if (store.users.some((item) => item.id !== user.id && item.email.toLowerCase() === email)) {
+        return error("Cette adresse e-mail est déjà utilisée.", 409, "email");
+      }
+      current.email = email;
+      return json(publicUser(current));
+    });
+  }
+  if (route === "auth/account/password") {
+    if (typeof body.current_password !== "string" || !body.current_password) {
+      return error("Saisissez votre mot de passe actuel.", 400, "current_password");
+    }
+    if (typeof body.password !== "string" || body.password.length < 8) {
+      return error("Le mot de passe doit contenir au moins 8 caractères.", 400, "password");
+    }
+    if (body.password !== body.password_confirm) {
+      return error("Les mots de passe ne correspondent pas.", 400, "password_confirm");
+    }
+    return updateStore((store) => {
+      const current = store.users.find((item) => item.id === user.id);
+      if (!current || !verifyPassword(body.current_password as string, current.password_hash)) {
+        return error("Le mot de passe actuel est incorrect.", 400, "current_password");
+      }
+      current.password_hash = hashPassword(body.password as string);
+      store.refresh_tokens = store.refresh_tokens.filter((item) => item.user_id !== user.id);
+      const refresh = token(current.id, "refresh");
+      store.refresh_tokens.push({ token: refresh, user_id: current.id });
+      return json(authResponse(current, refresh));
+    });
   }
   if (route === "categories") {
     if (typeof body.name !== "string" || !body.name.trim()) return error("Le nom est obligatoire.", 400, "name");
@@ -461,7 +563,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
   if (route === "subscriptions") {
     const validationError = validSubscription(body);
     if (validationError) return error(validationError);
-    return updateStore((store) => { const now = new Date().toISOString(); const subscription: StoredSubscription = { id: store.next_ids.subscriptions++, user_id: user.id, name: String(body.name).trim(), description: typeof body.description === "string" ? body.description : null, amount: Number(body.amount).toFixed(2), currency: body.currency as string, frequency: body.frequency as StoredSubscription["frequency"], start_date: body.start_date as string, billing_date: body.billing_date as string, status: body.status as StoredSubscription["status"], category: body.category ? Number(body.category) : null, website: typeof body.website === "string" && body.website ? body.website : null, notes: typeof body.notes === "string" && body.notes ? body.notes : null, created_at: now, updated_at: now }; store.subscriptions.push(subscription); return json(subscriptionResponse(subscription, store.categories), 201); });
+    return updateStore((store) => { const now = new Date().toISOString(); const subscription: StoredSubscription = { id: store.next_ids.subscriptions++, user_id: user.id, name: String(body.name).trim(), description: typeof body.description === "string" ? body.description : null, amount: Number(body.amount).toFixed(2), currency: body.currency as string, frequency: body.frequency as StoredSubscription["frequency"], start_date: body.start_date as string, billing_date: body.billing_date as string, status: body.status as StoredSubscription["status"], category: body.category ? Number(body.category) : null, website: typeof body.website === "string" && body.website ? body.website : null, notes: typeof body.notes === "string" && body.notes ? body.notes : null, deleted_at: null, created_at: now, updated_at: now }; store.subscriptions.push(subscription); return json(subscriptionResponse(subscription, store.categories), 201); });
   }
   return error("Ressource introuvable.", 404);
 }
@@ -515,9 +617,26 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ p
 export async function DELETE(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   const route = path.join("/");
-  const match = route.match(/^subscriptions\/(\d+)$/);
+  const match = route.match(/^subscriptions\/(\d+)(\/permanent)?$/);
   if (!match) return error("Ressource introuvable.", 404);
   const user = await authenticatedUser(request);
   if (!user) return error("Authentification requise.", 401);
-  return updateStore((store) => { const index = store.subscriptions.findIndex((item) => item.id === Number(match[1]) && item.user_id === user.id); if (index < 0) return error("Abonnement introuvable.", 404); store.subscriptions.splice(index, 1); return new NextResponse(null, { status: 204 }); });
+  return updateStore((store) => {
+    const index = store.subscriptions.findIndex(
+      (item) => item.id === Number(match[1]) && item.user_id === user.id
+    );
+    if (index < 0) return error("Abonnement introuvable.", 404);
+    const subscription = store.subscriptions[index];
+    if (match[2]) {
+      if (!subscription.deleted_at) return error("Cet abonnement n'est pas dans l'historique.", 400);
+      store.subscriptions.splice(index, 1);
+    } else {
+      if (subscription.deleted_at) return error("Abonnement introuvable.", 404);
+      subscription.deleted_at = new Date().toISOString();
+    }
+    store.notifications = store.notifications.filter(
+      (notification) => notification.subscription_id !== subscription.id
+    );
+    return new NextResponse(null, { status: 204 });
+  });
 }

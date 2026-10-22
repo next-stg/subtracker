@@ -22,6 +22,7 @@ import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import {
   CATEGORY_COLORS,
+  DELETED_SUBSCRIPTION_RETENTION_DAYS,
   FREQUENCY_LABELS,
   STATUS_LABELS,
   formatMoney,
@@ -95,7 +96,7 @@ export default function SubscriptionsPage() {
   async function handleDelete(subscription: Subscription) {
     if (
       !window.confirm(
-        `Supprimer « ${subscription.name} » ? Cette action est définitive.`
+        `Mettre « ${subscription.name} » dans l’historique ? Vous pourrez le restaurer pendant ${DELETED_SUBSCRIPTION_RETENTION_DAYS} jours.`
       )
     )
       return;

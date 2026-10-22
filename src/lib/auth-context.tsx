@@ -17,6 +17,12 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   refreshProfile: () => Promise<void>;
+  changeEmail: (payload: { email: string; current_password: string }) => Promise<void>;
+  changePassword: (payload: {
+    current_password: string;
+    password: string;
+    password_confirm: string;
+  }) => Promise<void>;
   register: (payload: {
     email: string;
     username: string;
@@ -60,6 +66,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(profile);
   }, []);
 
+  const changeEmail = useCallback(
+    async (payload: { email: string; current_password: string }) => {
+      const updatedUser = await api.updateEmail(payload);
+      setUser(updatedUser);
+    },
+    []
+  );
+
+  const changePassword = useCallback(
+    async (payload: {
+      current_password: string;
+      password: string;
+      password_confirm: string;
+    }) => {
+      const data = await api.changePassword(payload);
+      tokenStorage.set(data.access, data.refresh);
+      setUser(data.user);
+    },
+    []
+  );
+
   const register = useCallback(
     async (payload: {
       email: string;
@@ -86,7 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, refreshProfile, register, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, login, refreshProfile, changeEmail, changePassword, register, logout }}>
       {children}
     </AuthContext.Provider>
   );
